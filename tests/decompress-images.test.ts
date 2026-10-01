@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm, readFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { resolveMRef } from "../src/decompress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
@@ -121,4 +122,15 @@ test("decompress of a text-only message returns no image blocks (unchanged behav
   const res = await api.tools.find((t: any) => t.name === "decompress")!.execute("tc2", { blockId: "m00002" }, undefined, undefined, ctx);
   assert.equal(res.content.length, 1);
   assert.doesNotMatch(res.content[0].text, /Images:/);
+});
+
+test("resolveMRef accepts refs beyond five digits (kernel widens the ref space, never recycles)", () => {
+  const byRef = { m00042: "raw-a", m100001: "raw-b" };
+  assert.equal(resolveMRef("m00042", byRef), "raw-a");
+  assert.equal(resolveMRef("m42", byRef), "raw-a");
+  assert.equal(resolveMRef("M00042", byRef), "raw-a");
+  assert.equal(resolveMRef("m100001", byRef), "raw-b");
+  assert.equal(resolveMRef("m9999999", byRef), undefined);
+  assert.equal(resolveMRef("b5", byRef), undefined);
+  assert.equal(resolveMRef("m00042"), undefined);
 });
