@@ -654,10 +654,18 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     // model's view. Name their refs so the pixels can be pulled back on
     // demand — decompress restores them from the session log as image blocks.
     for (const b of newBlocks) {
-      const imgs = await collectImages(b.directMessageIds, ctx, (raw) => applied.state.messageRefs.byRaw[raw] ?? raw).catch(() => []);
+      const imgs = await collectImages(b.directMessageIds, ctx, (raw) => applied.state.messageRefs.byRaw[raw] ?? raw).catch((e) => {
+        logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fold-image-note-failed", error: e instanceof Error ? e.message : String(e) });
+        return [];
+      });
       if (imgs.length === 0) continue;
       const refs = [...new Set(imgs.map((i) => i.label))];
-      lines.push(` · ${b.blockId} folded ${imgs.length} image(s) from ${refs.join(", ")} — pixels are restorable: decompress({ blockId: "${refs[0]}" }) returns them as image blocks`);
+      // One decompress call restores one message's images — never imply a
+      // single call returns images from every named ref.
+      const restoreHint = refs.length === 1
+        ? `decompress({ blockId: "${refs[0]}" }) returns them as image blocks`
+        : `decompress({ blockId: "<ref>" }) for each ref above returns its image blocks`;
+      lines.push(` · ${b.blockId} folded ${imgs.length} image(s) from ${refs.join(", ")} — pixels are restorable: ${restoreHint}`);
     }
   }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
