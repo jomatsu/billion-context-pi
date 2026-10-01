@@ -16,6 +16,7 @@ import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from 
 import { assertNotAborted } from "./abort.js";
 import { getSystemPromptText } from "./compat.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { collectImages } from "./decompress-images.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
@@ -649,6 +650,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (blocksCreated > 0) {
     for (const b of newBlocks) lines.push(summaryFingerprintLine(b.blockId, b.summary));
+    // Folding projects text only, so images in the folded range leave the
+    // model's view. Name their refs so the pixels can be pulled back on
+    // demand — decompress restores them from the session log as image blocks.
+    for (const b of newBlocks) {
+      const imgs = await collectImages(b.directMessageIds, ctx, (raw) => applied.state.messageRefs.byRaw[raw] ?? raw).catch(() => []);
+      if (imgs.length === 0) continue;
+      const refs = [...new Set(imgs.map((i) => i.label))];
+      lines.push(` · ${b.blockId} folded ${imgs.length} image(s) from ${refs.join(", ")} — pixels are restorable: decompress({ blockId: "${refs[0]}" }) returns them as image blocks`);
+    }
   }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
