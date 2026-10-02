@@ -9,4 +9,8 @@ declare const DecompressParams: Type.TObject<{
     inline: Type.TOptional<Type.TBoolean>;
 }>;
 export declare function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof DecompressParams>;
+/** Resolve an mNNNNN message ref (as shown in acp tags / compress image
+ *  notes) to its raw id. Refs are never recycled and the kernel widens the
+ *  ref space rather than capping it, so any digit count is accepted. */
+export declare function resolveMRef(arg: string, byRef?: Record<string, string>): string | undefined;
 export {};

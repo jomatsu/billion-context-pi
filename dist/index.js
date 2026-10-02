@@ -18880,10 +18880,14 @@ async function handleCompress(args, runtime, ctx, toolCallId, signal) {
   if (blocksCreated > 0) {
     for (const b2 of newBlocks) lines.push(summaryFingerprintLine(b2.blockId, b2.summary));
     for (const b2 of newBlocks) {
-      const imgs = await collectImages(b2.directMessageIds, ctx, (raw) => applied.state.messageRefs.byRaw[raw] ?? raw).catch(() => []);
+      const imgs = await collectImages(b2.directMessageIds, ctx, (raw) => applied.state.messageRefs.byRaw[raw] ?? raw).catch((e) => {
+        logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fold-image-note-failed", error: e instanceof Error ? e.message : String(e) });
+        return [];
+      });
       if (imgs.length === 0) continue;
       const refs = [...new Set(imgs.map((i) => i.label))];
-      lines.push(` \xB7 ${b2.blockId} folded ${imgs.length} image(s) from ${refs.join(", ")} \u2014 pixels are restorable: decompress({ blockId: "${refs[0]}" }) returns them as image blocks`);
+      const restoreHint = refs.length === 1 ? `decompress({ blockId: "${refs[0]}" }) returns them as image blocks` : `decompress({ blockId: "<ref>" }) for each ref above returns its image blocks`;
+      lines.push(` \xB7 ${b2.blockId} folded ${imgs.length} image(s) from ${refs.join(", ")} \u2014 pixels are restorable: ${restoreHint}`);
     }
   }
   if (warnings.length > 0) lines.push("\u26A0\uFE0F " + warnings.join("; "));
@@ -19106,15 +19110,18 @@ ${text}${delivered2.note}`, images: delivered2.blocks };
     images: delivered.blocks
   };
 }
+function resolveMRef(arg, byRef) {
+  const m2 = /^m(\d+)$/i.exec(arg);
+  if (!m2) return void 0;
+  return byRef?.[arg] ?? byRef?.[`m${m2[1].padStart(5, "0")}`];
+}
 async function handleDecompress(args, runtime, ctx, signal) {
   assertNotAborted(signal);
   const { state, coreMessages } = await runtime.stateFor(ctx);
   assertNotAborted(signal);
   const arg = (args.blockId ?? "").trim();
   const refLabel = (rawId) => state.messageRefs?.byRaw?.[rawId] ?? rawId;
-  const refMatch = /^m(\d{1,5})$/.exec(arg);
-  const viaRef = refMatch ? state.messageRefs?.byRef?.[arg] ?? state.messageRefs?.byRef?.[`m${refMatch[1].padStart(5, "0")}`] : void 0;
-  const msgArg = viaRef ?? arg;
+  const msgArg = resolveMRef(arg, state.messageRefs?.byRef) ?? arg;
   const owner = state.blocks.find((b2) => b2.effectiveMessageIds.includes(msgArg));
   if (owner) {
     return handleMessageRef(msgArg, owner.blockId, args, ctx, refLabel);
