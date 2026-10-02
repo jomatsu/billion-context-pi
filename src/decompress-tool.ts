@@ -328,6 +328,15 @@ async function handleMessageRef(
   };
 }
 
+/** Resolve an mNNNNN message ref (as shown in acp tags / compress image
+ *  notes) to its raw id. Refs are never recycled and the kernel widens the
+ *  ref space rather than capping it, so any digit count is accepted. */
+export function resolveMRef(arg: string, byRef?: Record<string, string>): string | undefined {
+  const m = /^m(\d+)$/i.exec(arg);
+  if (!m) return undefined;
+  return byRef?.[arg] ?? byRef?.[`m${m[1]!.padStart(5, "0")}`];
+}
+
 async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, signal?: AbortSignal): Promise<DecompressOutput> {
   assertNotAborted(signal);
   const { state, coreMessages } = await runtime.stateFor(ctx);
@@ -340,9 +349,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // misread as a block number by parseBlockIdArg.
   const refLabel = (rawId: string): string => state.messageRefs?.byRaw?.[rawId] ?? rawId;
   // mNNNNN refs (as shown in acp tags / compress image notes) map to raw ids.
-  const refMatch = /^m(\d{1,5})$/.exec(arg);
-  const viaRef = refMatch ? (state.messageRefs?.byRef?.[arg] ?? state.messageRefs?.byRef?.[`m${refMatch[1]!.padStart(5, "0")}`]) : undefined;
-  const msgArg = viaRef ?? arg;
+  const msgArg = resolveMRef(arg, state.messageRefs?.byRef) ?? arg;
   const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(msgArg));
   if (owner) {
     return handleMessageRef(msgArg, owner.blockId, args, ctx, refLabel);

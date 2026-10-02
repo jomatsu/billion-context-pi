@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rm, readFile } from "node:fs/promises";
+import { rm, readFile, writeFile, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { createAcpExtension } from "../src/index.js";
+import { createRuntime } from "../src/runtime.js";
+import { resolveMRef } from "../src/decompress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
@@ -35,7 +39,7 @@ function fakeCtx(entries: any[], stateFile: string) {
     mode: "rpc", hasUI: false,
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
     model: { contextWindow: 200_000, input: ["text", "image"] },
-    sessionManager: { getBranch: () => entries, getEntries: () => entries, getSessionId: () => "img-session", getSessionFile: () => stateFile },
+    sessionManager: { getBranch: () => entries, getEntries: () => entries, getSessionId: () => "img-session", getSessionFile: () => stateFile, getEntry: (id: string) => entries.find((e) => e.id === id) },
   };
 }
 
@@ -121,4 +125,49 @@ test("decompress of a text-only message returns no image blocks (unchanged behav
   const res = await api.tools.find((t: any) => t.name === "decompress")!.execute("tc2", { blockId: "m00002" }, undefined, undefined, ctx);
   assert.equal(res.content.length, 1);
   assert.doesNotMatch(res.content[0].text, /Images:/);
+});
+
+test("decompress restores an inherited block's images from the PARENT session log (derived child)", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-decomp-imganc-"));
+  try {
+    const parentJsonl = path.join(dir, "parent.jsonl");
+    const childJsonl = path.join(dir, "child.jsonl");
+    const header = (id: string, parentSession?: string) => ({ type: "session", version: 3, id, timestamp: new Date().toISOString(), cwd: "/tmp", ...(parentSession ? { parentSession } : {}) });
+    const parentEntries = [userImage("p1", "Parent screenshot"), ...["2", "3", "4", "5", "6", "7"].map((n) => userText(`p${n}`, filler(n)))];
+    const childEntries = [userText("c1", filler("child-one"))];
+    await writeFile(parentJsonl, [JSON.stringify(header("parent-sid")), ...parentEntries.map((e) => JSON.stringify(e))].join("\n") + "\n", "utf8");
+    await writeFile(childJsonl, [JSON.stringify(header("child-sid", parentJsonl)), ...childEntries.map((e) => JSON.stringify(e))].join("\n") + "\n", "utf8");
+
+    const { api, handlers } = captureApi();
+    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    const parentCtx = fakeCtx(parentEntries, parentJsonl);
+    await handlers.get("context")![0]!({ type: "context", messages: [] }, parentCtx);
+    await api.tools.find((t: any) => t.name === "compress")!.execute("tc1",
+      { content: [{ startId: "m00001", endId: "m00001", summary: "Parent session screenshot folded with its caption and pixel payload." }] }, undefined, undefined, parentCtx);
+
+    const runtime = createRuntime({});
+    assert.equal(await runtime.deriveChildState(
+      { sessionId: "child-sid", sessionFile: childJsonl },
+      { sessionId: "parent-sid", sessionFile: parentJsonl },
+    ), true, "child derivation must succeed");
+
+    const leafCtx = fakeCtx(childEntries, childJsonl);
+    const res: any = await api.tools.find((t: any) => t.name === "decompress")!.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, leafCtx);
+    const images = res.content.filter((b: any) => b.type === "image");
+    assert.equal(images.length, 1, "inherited block image restored via ancestor fallback");
+    assert.deepEqual(images[0], { type: "image", data: PNG, mimeType: "image/png" });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveMRef accepts refs beyond five digits (kernel widens the ref space, never recycles)", () => {
+  const byRef = { m00042: "raw-a", m100001: "raw-b" };
+  assert.equal(resolveMRef("m00042", byRef), "raw-a");
+  assert.equal(resolveMRef("m42", byRef), "raw-a");
+  assert.equal(resolveMRef("M00042", byRef), "raw-a");
+  assert.equal(resolveMRef("m100001", byRef), "raw-b");
+  assert.equal(resolveMRef("m9999999", byRef), undefined);
+  assert.equal(resolveMRef("b5", byRef), undefined);
+  assert.equal(resolveMRef("m00042"), undefined);
 });
