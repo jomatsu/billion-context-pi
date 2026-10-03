@@ -46,8 +46,12 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
-export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof CompressParams> {
-  return applyToolPromptOverrides({
+/** `extraGuidelines` are appended after any `toolPrompts` override. The ACP
+ *  system prompt rides here (see wireSystemPrompt in index.ts): tool
+ *  guidelines live in pi's tool registry, so they stay in the prompt on turns
+ *  where before_agent_start does not run, and the cached prefix holds. */
+export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides, extraGuidelines: readonly string[] = []): ToolDefinition<typeof CompressParams> {
+  const def = applyToolPromptOverrides({
     name: "compress",
     label: "Compress",
     description:
@@ -72,6 +76,7 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   }, overrides);
+  return extraGuidelines.length > 0 ? { ...def, promptGuidelines: [...(def.promptGuidelines ?? []), ...extraGuidelines] } : def;
 }
 
 type RangeEntry = Static<typeof RangeSpec>;

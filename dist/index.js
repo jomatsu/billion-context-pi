@@ -18443,8 +18443,8 @@ var CompressParams = typebox_exports.Object({
   ], { description: "One or more ranges to compress, each with start/end boundaries and a summary. When compressing multiple unrelated ranges in one call, give each its own topic." }),
   summaryMaxChars: typebox_exports.Optional(typebox_exports.Number({ description: "Override max summary length (default max: 20000 chars). Use when content is important and needs more detail \u2014 don't lose critical info just to fit the limit." }))
 });
-function makeCompressTool(runtime, overrides) {
-  return applyToolPromptOverrides({
+function makeCompressTool(runtime, overrides, extraGuidelines = []) {
+  const def = applyToolPromptOverrides({
     name: "compress",
     label: "Compress",
     description: "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) \u2014 each entry gets its own summary.",
@@ -18468,6 +18468,7 @@ function makeCompressTool(runtime, overrides) {
       return { details: void 0, content: [{ type: "text", text: result }] };
     }
   }, overrides);
+  return extraGuidelines.length > 0 ? { ...def, promptGuidelines: [...def.promptGuidelines ?? [], ...extraGuidelines] } : def;
 }
 function normalizeRanges(args) {
   const effective = repairContentTail(repairBareRangeObjects(args));
@@ -23982,12 +23983,13 @@ function createAcpExtension(adapter = {}) {
     wireSessionLifecycle(pi, runtime, standDownIfProxied);
     wireContextTransform(pi, runtime, standDownIfProxied);
     wireBeforeProviderRequest(pi, runtime, standDownIfProxied);
-    wireSystemPrompt(pi, runtime);
+    const toolSurface = readToolSurfaceWithPacks(process.cwd());
+    const compressTool = makeCompressRegistrar(pi, runtime, toolSurface.compress);
+    wireSystemPrompt(pi, runtime, compressTool);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    const toolSurface = readToolSurfaceWithPacks(process.cwd());
-    pi.registerTool(makeCompressTool(runtime, toolSurface.compress));
+    compressTool.sync(computeAcpPrompt(runtime));
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
@@ -24455,35 +24457,63 @@ ${rendered.text}${example}`);
   });
 }
 var lastPackPromptGateKeys = null;
-function wireSystemPrompt(pi, runtime) {
-  pi.on("before_agent_start", (event, ctx) => {
-    if (runtime.refused) return;
-    const m2 = ctx?.model;
-    const cwd = ctx?.cwd ?? process.cwd();
-    const requested = resolvePackName(runtime.adapter, m2?.provider, m2?.id);
-    const activePack = resolveActivePack(runtime.adapter, cwd, m2?.provider, m2?.id);
-    const merged = mergeSurface(activePack, runtime.adapter);
-    try {
-      const sid = ctx?.sessionManager?.getSessionId();
-      if (sid) runtime.store.setActivePack(ctx?.sessionManager?.getSessionFile?.(), sid, surfaceMetaOf(activePack, requested).pack);
-    } catch {
+function makeCompressRegistrar(pi, runtime, overrides) {
+  let registered;
+  let current = makeCompressTool(runtime, overrides);
+  return {
+    sync(acpPrompt) {
+      if (acpPrompt === registered) return;
+      registered = acpPrompt;
+      current = makeCompressTool(runtime, overrides, acpPrompt ? [acpPrompt] : []);
+      pi.registerTool(current);
+    },
+    guidelines: () => [...current.promptGuidelines ?? []]
+  };
+}
+function computeAcpPrompt(runtime, ctx) {
+  const m2 = ctx?.model;
+  const cwd = ctx?.cwd ?? process.cwd();
+  const requested = resolvePackName(runtime.adapter, m2?.provider, m2?.id);
+  const activePack = resolveActivePack(runtime.adapter, cwd, m2?.provider, m2?.id);
+  const merged = mergeSurface(activePack, runtime.adapter);
+  try {
+    const sid = ctx?.sessionManager?.getSessionId();
+    if (sid) runtime.store.setActivePack(ctx?.sessionManager?.getSessionFile?.(), sid, surfaceMetaOf(activePack, requested).pack);
+  } catch {
+  }
+  try {
+    runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+  } catch (e) {
+    const keys = Object.keys(merged.prompts).sort().join(",");
+    if (keys !== lastPackPromptGateKeys) {
+      lastPackPromptGateKeys = keys;
+      logWarn("config", { event: "pack-prompts-gated", keys, error: e instanceof Error ? e.message : String(e) });
     }
-    try {
-      runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
-    } catch (e) {
-      const keys = Object.keys(merged.prompts).sort().join(",");
-      if (keys !== lastPackPromptGateKeys) {
-        lastPackPromptGateKeys = keys;
-        logWarn("config", { event: "pack-prompts-gated", keys, error: e instanceof Error ? e.message : String(e) });
-      }
-      runtime.setPrompts(defaultPrompts);
-    }
-    const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
-    const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
-    const delegateText = merged.delegatePrompt !== void 0 ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
-    const prompt = delegate && delegateText !== null ? `${acp}
+    runtime.setPrompts(defaultPrompts);
+  }
+  const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
+  const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+  const delegateText = merged.delegatePrompt !== void 0 ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
+  return delegate && delegateText !== null ? `${acp}
 ${delegateText}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+}
+function wireSystemPrompt(pi, runtime, compressTool) {
+  pi.on("before_agent_start", (event, ctx) => {
+    const options = event.systemPromptOptions;
+    const viaGuidelines = options?.toolGuidelines !== void 0 && !options.customPrompt;
+    if (runtime.refused) {
+      compressTool.sync(null);
+      if (viaGuidelines) options.toolGuidelines.compress = compressTool.guidelines();
+      return;
+    }
+    const prompt = computeAcpPrompt(runtime, ctx);
+    if (!viaGuidelines) {
+      compressTool.sync(null);
+      return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    }
+    compressTool.sync(prompt);
+    options.toolGuidelines.compress = compressTool.guidelines();
+    return;
   });
 }
 function activeNudgeSections(runtime, ctx) {

@@ -121,12 +121,13 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireSessionLifecycle(pi, runtime, standDownIfProxied);
     wireContextTransform(pi, runtime, standDownIfProxied);
     wireBeforeProviderRequest(pi, runtime, standDownIfProxied);
-    wireSystemPrompt(pi, runtime);
+    const toolSurface = readToolSurfaceWithPacks(process.cwd());
+    const compressTool = makeCompressRegistrar(pi, runtime, toolSurface.compress);
+    wireSystemPrompt(pi, runtime, compressTool);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    const toolSurface = readToolSurfaceWithPacks(process.cwd());
-    pi.registerTool(makeCompressTool(runtime, toolSurface.compress));
+    compressTool.sync(computeAcpPrompt(runtime));
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
@@ -900,41 +901,93 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
 let lastPackPromptGateKeys: string | null = null;
 
-function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
+interface CompressRegistrar {
+  /** Register the compress tool carrying `acpPrompt` as its last guideline
+   *  (null = none). No-op when unchanged, so pi records no prompt delta. */
+  sync(acpPrompt: string | null): void;
+  guidelines(): string[];
+}
+
+function makeCompressRegistrar(pi: ExtensionAPI, runtime: AcpRuntime, overrides: Parameters<typeof makeCompressTool>[1]): CompressRegistrar {
+  let registered: string | null | undefined;
+  let current = makeCompressTool(runtime, overrides);
+  return {
+    sync(acpPrompt) {
+      if (acpPrompt === registered) return;
+      registered = acpPrompt;
+      current = makeCompressTool(runtime, overrides, acpPrompt ? [acpPrompt] : []);
+      pi.registerTool(current);
+    },
+    guidelines: () => [...(current.promptGuidelines ?? [])],
+  };
+}
+
+/** The ACP prompt for the active model/pack. Also applies the pack's rule
+ *  prompts to the runtime and stamps the active pack (side effects the
+ *  compress path depends on). */
+function computeAcpPrompt(runtime: AcpRuntime, ctx?: ExtensionContext): string {
+  const m = ctx?.model as { provider?: string; id?: string } | undefined;
+  const cwd = ctx?.cwd ?? process.cwd();
+  const requested = resolvePackName(runtime.adapter, m?.provider, m?.id);
+  const activePack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
+  const merged = mergeSurface(activePack, runtime.adapter);
+  // Audit stamp (#431 forensics): record the effective pack for this
+  // session; persisted into the sidecar on the next state save.
+  try {
+    const sid = ctx?.sessionManager?.getSessionId();
+    if (sid) runtime.store.setActivePack(ctx?.sessionManager?.getSessionFile?.(), sid, surfaceMetaOf(activePack, requested).pack);
+  } catch {
+    // best-effort — status reporting never depends on the stamp
+  }
+  // Unconditional: switching to a model/pack without prompt overrides must
+  // reset the rules to kernel defaults, not keep the previous pack's.
+  try {
+    runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+  } catch (e) {
+    const keys = Object.keys(merged.prompts).sort().join(",");
+    if (keys !== lastPackPromptGateKeys) {
+      lastPackPromptGateKeys = keys;
+      logWarn("config", { event: "pack-prompts-gated", keys, error: e instanceof Error ? e.message : String(e) });
+    }
+    runtime.setPrompts(defaultPrompts);
+  }
+  const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
+  const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+  const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
+  return delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
+}
+
+/** The ACP prompt is static per model/pack, so on hosts with structured
+ *  prompt options it is carried as a compress-tool guideline instead of a
+ *  forced `systemPrompt`. A forced prompt is not recorded in the transcript:
+ *  on turns where pi skips before_agent_start (triggerTurn notifications,
+ *  pi#5581) the leading prompt reverts to the base and the whole cached prefix
+ *  is re-billed, twice per notification. Tool guidelines live in pi's tool
+ *  registry and survive those turns. Hosts without `systemPromptOptions`
+ *  (older pi, OMP) or with a custom SYSTEM.md (which drops guidelines) keep
+ *  the forced prompt. */
+function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime, compressTool: CompressRegistrar): void {
   pi.on("before_agent_start", (event, ctx) => {
+    const options = (event as { systemPromptOptions?: { customPrompt?: string; toolGuidelines?: Record<string, string[]> } }).systemPromptOptions;
+    const viaGuidelines = options?.toolGuidelines !== undefined && !options.customPrompt;
     // Refused host (OMP): don't inject the ACP system prompt — the model must
     // not learn about compress/decompress on a host where they can't work.
-    if (runtime.refused) return;
-    const m = ctx?.model as { provider?: string; id?: string } | undefined;
-    const cwd = ctx?.cwd ?? process.cwd();
-    const requested = resolvePackName(runtime.adapter, m?.provider, m?.id);
-    const activePack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
-    const merged = mergeSurface(activePack, runtime.adapter);
-    // Audit stamp (#431 forensics): record the effective pack for this
-    // session; persisted into the sidecar on the next state save.
-    try {
-      const sid = ctx?.sessionManager?.getSessionId();
-      if (sid) runtime.store.setActivePack(ctx?.sessionManager?.getSessionFile?.(), sid, surfaceMetaOf(activePack, requested).pack);
-    } catch {
-      // best-effort — status reporting never depends on the stamp
+    if (runtime.refused) {
+      compressTool.sync(null);
+      if (viaGuidelines) options!.toolGuidelines!.compress = compressTool.guidelines();
+      return;
     }
-    // Unconditional: switching to a model/pack without prompt overrides must
-    // reset the rules to kernel defaults, not keep the previous pack's.
-    try {
-      runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
-    } catch (e) {
-      const keys = Object.keys(merged.prompts).sort().join(",");
-      if (keys !== lastPackPromptGateKeys) {
-        lastPackPromptGateKeys = keys;
-        logWarn("config", { event: "pack-prompts-gated", keys, error: e instanceof Error ? e.message : String(e) });
-      }
-      runtime.setPrompts(defaultPrompts);
+    const prompt = computeAcpPrompt(runtime, ctx);
+    if (!viaGuidelines) {
+      compressTool.sync(null);
+      // cache-guard-ignore force-system-prompt: fallback only for hosts without structured prompt options or with a custom SYSTEM.md (which drops tool guidelines)
+      return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
     }
-    const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
-    const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
-    const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
-    const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    compressTool.sync(prompt);
+    // This run's options were snapshotted before the handler ran; patch them
+    // so a pack switch takes effect now, not one run late.
+    options!.toolGuidelines!.compress = compressTool.guidelines();
+    return;
   });
 }
 

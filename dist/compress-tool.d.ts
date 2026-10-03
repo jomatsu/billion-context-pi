@@ -20,7 +20,11 @@ declare const CompressParams: Type.TObject<{
     summaryMaxChars: Type.TOptional<Type.TNumber>;
 }>;
 type CompressArgs = Static<typeof CompressParams>;
-export declare function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof CompressParams>;
+/** `extraGuidelines` are appended after any `toolPrompts` override. The ACP
+ *  system prompt rides here (see wireSystemPrompt in index.ts): tool
+ *  guidelines live in pi's tool registry, so they stay in the prompt on turns
+ *  where before_agent_start does not run, and the cached prefix holds. */
+export declare function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides, extraGuidelines?: readonly string[]): ToolDefinition<typeof CompressParams>;
 type RangeEntry = Static<typeof RangeSpec>;
 export declare function normalizeRanges(args: CompressArgs): RangeEntry[] | string;
 export declare function tailRepair(s: string): string | undefined;

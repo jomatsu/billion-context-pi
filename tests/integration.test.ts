@@ -97,6 +97,33 @@ test("before_agent_start appends the ACP system prompt", () => {
   assert.ok(result.systemPrompt.includes("acp"));
 });
 
+test("before_agent_start carries the ACP prompt as a compress guideline when the host has structured options", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const lastCompress = () => [...api.tools].reverse().find((t) => t.name === "compress")!;
+  // Registered at load, before any turn: a notification turn that skips
+  // before_agent_start still sees the guideline (pi#5581).
+  const atLoad = lastCompress().promptGuidelines as string[];
+  assert.ok(atLoad.some((g) => g.includes("compress") && g.includes("acp")), "guideline present at load");
+
+  const toolGuidelines: Record<string, string[]> = { compress: ["stale"] };
+  const registeredBefore = api.tools.length;
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE", systemPromptOptions: { toolGuidelines } }, {});
+  assert.equal(result, undefined, "no forced systemPrompt");
+  assert.equal(api.tools.length, registeredBefore, "unchanged prompt does not re-register the tool");
+  assert.deepEqual(toolGuidelines.compress, atLoad, "this run's options patched");
+});
+
+test("before_agent_start keeps the forced prompt under a custom SYSTEM.md and drops the guideline", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const toolGuidelines: Record<string, string[]> = {};
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "CUSTOM", systemPromptOptions: { customPrompt: "CUSTOM", toolGuidelines } }, {});
+  assert.ok(result.systemPrompt.startsWith("CUSTOM") && result.systemPrompt.includes("compress"));
+  const compress = [...api.tools].reverse().find((t) => t.name === "compress")!;
+  assert.ok(!(compress.promptGuidelines as string[]).some((g) => g.includes("acp") && g.length > 500), "no duplicate ACP guideline");
+});
+
 test("context handler tags every message with a ref even when length matches event.messages", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
