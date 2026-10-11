@@ -271,6 +271,23 @@ export declare function buildCancelResult(run: DelegateRun, content: string, mod
 };
 export declare function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams>;
 export declare function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof CancelParams>;
+/** Command line for a delegate child. A compiled Pi binary (stock Pi or
+ *  Pi-Bolt) has a virtual argv[1] and reads any extra positional argument as
+ *  a prompt, so it is restarted directly with no CLI entry. Pi-Bolt's macOS
+ *  build runs as `pi-bin` beside a `pi` launcher; children go through the
+ *  launcher so they keep its spawn helper and page preload. */
+export declare function delegateSpawnCommand(opts: {
+    argv1: string;
+    execPath: string;
+    bunVersion: string | undefined;
+    env: NodeJS.ProcessEnv;
+    isPi: boolean;
+    cliArgs: string[];
+    exists?: (path: string) => boolean;
+}): {
+    command: string;
+    args: string[];
+};
 export declare function buildChildArgs(args: DelegateArgs, rolePrompt: string, ctx: ExtensionContext, runId: string): Promise<{
     cliArgs: string[];
     tmpDir: string;

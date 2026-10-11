@@ -6,7 +6,7 @@ import {
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, appendFile, readFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { Type, type Static } from "typebox";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import type {
@@ -1183,6 +1183,34 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
   };
 }
 
+const COMPILED_ENTRY_RE = /^(?:\/\$bunfs\/|B:[\\/]~BUN[\\/])/;
+
+/** Command line for a delegate child. A compiled Pi binary (stock Pi or
+ *  Pi-Bolt) has a virtual argv[1] and reads any extra positional argument as
+ *  a prompt, so it is restarted directly with no CLI entry. Pi-Bolt's macOS
+ *  build runs as `pi-bin` beside a `pi` launcher; children go through the
+ *  launcher so they keep its spawn helper and page preload. */
+export function delegateSpawnCommand(opts: {
+  argv1: string;
+  execPath: string;
+  bunVersion: string | undefined;
+  env: NodeJS.ProcessEnv;
+  isPi: boolean;
+  cliArgs: string[];
+  exists?: (path: string) => boolean;
+}): { command: string; args: string[] } {
+  if (opts.isPi && opts.bunVersion && COMPILED_ENTRY_RE.test(opts.argv1)) {
+    let command = opts.execPath;
+    const launcher = join(dirname(command), "pi");
+    if (basename(command) === "pi-bin" && (opts.exists ?? existsSync)(launcher)) command = launcher;
+    return { command, args: opts.cliArgs };
+  }
+  return {
+    command: opts.execPath,
+    args: [resolvePiCliEntry(opts.argv1, opts.env, opts.isPi), ...opts.cliArgs],
+  };
+}
+
 function spawnDelegateChild(opts: {
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -1192,11 +1220,15 @@ function spawnDelegateChild(opts: {
   resumeFrom: boolean;
   task: string | undefined;
 }): ChildProcess {
-  const child = spawn(
-    process.execPath,
-    [resolvePiCliEntry(process.argv[1] ?? "", process.env, opts.isPi), ...opts.cliArgs],
-    delegateSpawnOptions(opts.cwd, opts.env),
-  ) as ChildProcess;
+  const { command, args } = delegateSpawnCommand({
+    argv1: process.argv[1] ?? "",
+    execPath: process.execPath,
+    bunVersion: process.versions.bun,
+    env: process.env,
+    isPi: opts.isPi,
+    cliArgs: opts.cliArgs,
+  });
+  const child = spawn(command, args, delegateSpawnOptions(opts.cwd, opts.env)) as ChildProcess;
   child.stdin?.once("error", (e: Error) => {
     debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
     logError("delegate", { event: "stdin-error", runId: opts.runId, error: String(e) });

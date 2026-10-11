@@ -19491,7 +19491,7 @@ import {
 import { createWriteStream, existsSync as existsSync4 } from "fs";
 import { mkdir as mkdir3, mkdtemp, writeFile as writeFile3, rm, appendFile, readFile, copyFile } from "fs/promises";
 import { tmpdir as tmpdir2 } from "os";
-import { dirname as dirname8, join as join10, resolve as resolvePath } from "path";
+import { basename as basename4, dirname as dirname8, join as join10, resolve as resolvePath } from "path";
 
 // src/footer-status.ts
 var FOOTER_STATUS_KEY = "billion-context-pi";
@@ -20734,12 +20734,29 @@ function makeDelegateCancelTool(_pi) {
     }
   };
 }
+var COMPILED_ENTRY_RE = /^(?:\/\$bunfs\/|B:[\\/]~BUN[\\/])/;
+function delegateSpawnCommand(opts) {
+  if (opts.isPi && opts.bunVersion && COMPILED_ENTRY_RE.test(opts.argv1)) {
+    let command = opts.execPath;
+    const launcher = join10(dirname8(command), "pi");
+    if (basename4(command) === "pi-bin" && (opts.exists ?? existsSync4)(launcher)) command = launcher;
+    return { command, args: opts.cliArgs };
+  }
+  return {
+    command: opts.execPath,
+    args: [resolvePiCliEntry(opts.argv1, opts.env, opts.isPi), ...opts.cliArgs]
+  };
+}
 function spawnDelegateChild(opts) {
-  const child = spawn(
-    process.execPath,
-    [resolvePiCliEntry(process.argv[1] ?? "", process.env, opts.isPi), ...opts.cliArgs],
-    delegateSpawnOptions(opts.cwd, opts.env)
-  );
+  const { command, args } = delegateSpawnCommand({
+    argv1: process.argv[1] ?? "",
+    execPath: process.execPath,
+    bunVersion: process.versions.bun,
+    env: process.env,
+    isPi: opts.isPi,
+    cliArgs: opts.cliArgs
+  });
+  const child = spawn(command, args, delegateSpawnOptions(opts.cwd, opts.env));
   child.stdin?.once("error", (e) => {
     debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
     logError("delegate", { event: "stdin-error", runId: opts.runId, error: String(e) });
