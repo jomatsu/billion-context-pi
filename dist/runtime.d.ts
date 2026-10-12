@@ -51,10 +51,27 @@ export interface AcpRuntime {
      *  that cycles through many sessions doesn't accumulate them. */
     throttleDrop: (sid: string) => void;
     /** Per-session tokenCount scale tracker (estimate vs provider). Returns true
-     *  when the scale just flipped (stale↔not-stale) so the caller can reset the
-     *  growth baseline — a cross-scale delta is a false artifact, not real growth
-     *  (issue #267). The first observation for a session never reports a flip. */
-    noteTokenScale: (sid: string, stale: boolean) => boolean;
+     *  when the dominant ruler (hostFloor vs sentTokens) just switched by more
+     *  than the hysteresis dead-band, so the caller can reset the growth baseline
+     *  — a cross-scale delta is a false artifact, not real growth (issue #267).
+     *  Near-tied rulers jittering inside the band do NOT report a flip (#598).
+     *  The first observation for a session never reports a flip. */
+    noteTokenScale: (sid: string, hostFloor: number, sentTokens: number) => boolean;
+    /** Settle the previous request's pending estimate against the usage that
+     *  arrived for it; learn/publish/clear the k̂ calibration factor. Returns
+     *  the current k̂ (null while unpublished) and whether the meter's ruler
+     *  just changed (model switch, k̂ publish or disagreement clear) — the
+     *  caller re-anchors growth baselines on that transition (#598 root fix). */
+    noteKhatUsage: (sid: string, model: string, usageTokens: number) => {
+        khat: number | null;
+        scaleChanged: boolean;
+    };
+    /** Current published k̂ for the session+model, or null. */
+    khatFor: (sid: string, model: string) => number | null;
+    /** Record the estimate of the request being assembled; settled next turn. */
+    setKhatPending: (sid: string, model: string, estimate: number) => void;
+    /** Drop a session's k̂ calibration state (session_shutdown). */
+    dropKhat: (sid: string) => void;
     /** Drop a session's token-scale tracker (session_shutdown). */
     dropTokenScale: (sid: string) => void;
     store: SessionStateStore;
