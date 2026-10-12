@@ -98,3 +98,36 @@ export function compressionAnchorStaleness(
   }
   return { predates: scan.lastCompressIdx > scan.lastUsageIdx, netReclaimed };
 }
+
+function anchorUsageTokens(u: UsageLike): number {
+  if (!u) return 0;
+  return (u.totalTokens ?? 0) || (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+}
+
+export interface HostUsageAnchor {
+  // a context_edit/compaction entry postdates the last valid usage anchor, so
+  // pi's getContextUsage() fell back to a chars/4 estimate of the whole
+  // projected session (pi estimateProjectedContextTokens) — which never sees
+  // ACP's pruning and reports millions on long image-heavy sessions
+  unanchored: boolean;
+  // provider-reported context tokens of the last valid assistant (0 if none)
+  anchorTokens: number;
+}
+
+// Pi writes context_edit entries when it omits a failed/overflowed attempt;
+// from then until the next successful response, getContextUsage() is not a
+// provider measurement. Mirror pi's invalidation rule so the host floor can
+// fall back to the last real measurement instead of the whole-session estimate.
+export function hostUsageAnchor(entries: AnchorEntry[]): HostUsageAnchor {
+  const { lastUsageIdx } = scanEntries(entries);
+  let unanchored = false;
+  for (let i = entries.length - 1; i > lastUsageIdx; i--) {
+    const t = entries[i]!.type;
+    if (t === "context_edit" || t === "compaction") {
+      unanchored = true;
+      break;
+    }
+  }
+  const anchorTokens = lastUsageIdx >= 0 ? anchorUsageTokens(entries[lastUsageIdx]!.message?.usage) : 0;
+  return { unanchored, anchorTokens };
+}

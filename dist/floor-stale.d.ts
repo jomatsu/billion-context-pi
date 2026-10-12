@@ -28,4 +28,9 @@ export interface AnchorStaleness {
     netReclaimed: number;
 }
 export declare function compressionAnchorStaleness(entries: AnchorEntry[], blocks: readonly CompressionBlock[], countTokens: (text: string) => number): AnchorStaleness;
+export interface HostUsageAnchor {
+    unanchored: boolean;
+    anchorTokens: number;
+}
+export declare function hostUsageAnchor(entries: AnchorEntry[]): HostUsageAnchor;
 export {};

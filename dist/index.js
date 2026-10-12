@@ -13104,7 +13104,7 @@ function buildLcp(sequence, suffixArray) {
 }
 
 // src/overflow-selfheal.ts
-var OVERFLOW_MARKER = /prompt is too long|prompt_too_long|prompt_is_too_long|prompt too long; exceeded (?:max )?context length|request_too_large|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded|input is too long for requested model|maximum prompt length is|exceeds the maximum allowed input length|is longer than the model['’]?s context length|exceeds the available context size|greater than the context length|context window exceeds limit|too large for model with \d+ maximum context length|but the configured context size is|model_context_window_exceeded|range of input length should be/i;
+var OVERFLOW_MARKER = /prompt is too long|prompt_too_long|prompt_is_too_long|prompt too long; exceeded (?:max )?context length|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded|input is too long for requested model|maximum prompt length is|exceeds the maximum allowed input length|is longer than the model['’]?s context length|exceeds the available context size|greater than the context length|context window exceeds limit|too large for model with \d+ maximum context length|but the configured context size is|model_context_window_exceeded|range of input length should be/i;
 function inspectOverflowMessage(haystack) {
   const body = (haystack ?? "").trim();
   if (!body || !OVERFLOW_MARKER.test(body)) return { isOverflow: false, message: body };
@@ -19483,6 +19483,23 @@ function compressionAnchorStaleness(entries, blocks, countTokens) {
   }
   return { predates: scan.lastCompressIdx > scan.lastUsageIdx, netReclaimed };
 }
+function anchorUsageTokens(u) {
+  if (!u) return 0;
+  return (u.totalTokens ?? 0) || (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+}
+function hostUsageAnchor(entries) {
+  const { lastUsageIdx } = scanEntries(entries);
+  let unanchored = false;
+  for (let i = entries.length - 1; i > lastUsageIdx; i--) {
+    const t = entries[i].type;
+    if (t === "context_edit" || t === "compaction") {
+      unanchored = true;
+      break;
+    }
+  }
+  const anchorTokens = lastUsageIdx >= 0 ? anchorUsageTokens(entries[lastUsageIdx].message?.usage) : 0;
+  return { unanchored, anchorTokens };
+}
 
 // src/delegate-tool.ts
 import {
@@ -24235,9 +24252,14 @@ function wireContextTransform(pi, runtime, standDownIfProxied) {
         logWarn("overflow-selfheal", { sid, event: "armed-emergency", floor: armedFloor, limit: config.modelContextLimit });
       }
       const { predates, netReclaimed } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
-      const realPromptTokens = realUsage?.tokens ?? 0;
+      const hostAnchor = hostUsageAnchor(entries);
+      const rawHostTokens = realUsage?.tokens ?? 0;
+      const realPromptTokens = rawHostTokens > 0 && hostAnchor.unanchored ? Math.min(rawHostTokens, hostAnchor.anchorTokens) : rawHostTokens;
+      if (rawHostTokens > 0 && hostAnchor.unanchored && realPromptTokens !== rawHostTokens) {
+        logInfo("host-floor", { sid, event: "unanchored-host-estimate", hostTokens: rawHostTokens, anchorTokens: hostAnchor.anchorTokens });
+      }
       const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
-      const hostUsageStable = !predates && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
+      const hostUsageStable = !predates && !hostAnchor.unanchored && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
       const calibrate = (base) => hostUsageStable ? Math.min(base, Math.ceil(realPromptTokens * 1.2)) : base;
       const applyFloors = (base) => Math.max(calibrate(base), hostFloor, armedFloor);
       const guardBasis = (base) => Math.max(calibrate(base), hostFloor);

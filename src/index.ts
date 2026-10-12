@@ -36,7 +36,7 @@ import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount, sentViewMeterMatches } from "./tokens.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
-import { compressionAnchorStaleness } from "./floor-stale.js";
+import { compressionAnchorStaleness, hostUsageAnchor } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -477,7 +477,16 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // the skip dropped the meter onto the undercounting estimate (~70-80K low)
       // and the next fresh reading snapped it back into the emergency band.
       const { predates, netReclaimed } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
-      const realPromptTokens = realUsage?.tokens ?? 0;
+      // An unanchored host reading (context_edit after the last usage, e.g. a
+      // failed attempt pi omitted) is a whole-session chars/4 estimate blind to
+      // ACP pruning — it read 5.8-7.8M on a 1M window and pinned EMERGENCY.
+      // Floor at the last provider measurement instead.
+      const hostAnchor = hostUsageAnchor(entries);
+      const rawHostTokens = realUsage?.tokens ?? 0;
+      const realPromptTokens = rawHostTokens > 0 && hostAnchor.unanchored ? Math.min(rawHostTokens, hostAnchor.anchorTokens) : rawHostTokens;
+      if (rawHostTokens > 0 && hostAnchor.unanchored && realPromptTokens !== rawHostTokens) {
+        logInfo("host-floor", { sid, event: "unanchored-host-estimate", hostTokens: rawHostTokens, anchorTokens: hostAnchor.anchorTokens });
+      }
       const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
@@ -489,7 +498,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // pre-send prediction for growth beyond the lagged-by-one-response
       // measurement. Stale or jittering measurements fall back to the raw
       // estimate; the divergence watch below keeps that fallback visible.
-      const hostUsageStable = !predates && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
+      const hostUsageStable = !predates && !hostAnchor.unanchored && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
       const calibrate = (base: number): number =>
         hostUsageStable ? Math.min(base, Math.ceil(realPromptTokens * 1.2)) : base;
       const applyFloors = (base: number): number => Math.max(calibrate(base), hostFloor, armedFloor);

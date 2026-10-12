@@ -17,9 +17,13 @@
 // or ask pi to retry: the overflow is real, and re-sending the same context
 // would overflow again. The error surfaces; the next turn recovers.
 //
-// NOTE: the OVERFLOW_MARKER below is deliberately a superset of the
-// OVERFLOW_GUARD in src/throttle-retry.ts (which uses it to AVOID treating an
-// overflow as a throttle). Keep the two in sync when either changes.
+// NOTE: the OVERFLOW_MARKER below is a superset of the OVERFLOW_GUARD in
+// src/throttle-retry.ts (which uses it to AVOID treating an overflow as a
+// throttle) except for `request_too_large`: Anthropic's 413 "Request exceeds
+// the maximum size" is a payload-BYTES limit (images, large tool output), not
+// a token overflow. Arming the token emergency for it only truncated text and
+// pinned EMERGENCY while the images that busted the cap stayed. The throttle
+// guard keeps it so a 413 is still never retried as a throttle.
 
 import { parsePercent } from "./config.js";
 
@@ -33,7 +37,7 @@ import { parsePercent } from "./config.js";
 // providers (pi's native overflow/compaction handling still copes, but no
 // window is learned and no emergency is armed).
 export const OVERFLOW_MARKER =
-  /prompt is too long|prompt_too_long|prompt_is_too_long|prompt too long; exceeded (?:max )?context length|request_too_large|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded|input is too long for requested model|maximum prompt length is|exceeds the maximum allowed input length|is longer than the model['’]?s context length|exceeds the available context size|greater than the context length|context window exceeds limit|too large for model with \d+ maximum context length|but the configured context size is|model_context_window_exceeded|range of input length should be/i;
+  /prompt is too long|prompt_too_long|prompt_is_too_long|prompt too long; exceeded (?:max )?context length|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded|input is too long for requested model|maximum prompt length is|exceeds the maximum allowed input length|is longer than the model['’]?s context length|exceeds the available context size|greater than the context length|context window exceeds limit|too large for model with \d+ maximum context length|but the configured context size is|model_context_window_exceeded|range of input length should be/i;
 
 export interface OverflowInfo {
   isOverflow: boolean;

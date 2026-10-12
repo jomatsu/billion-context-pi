@@ -49,7 +49,8 @@ test("inspectOverflowMessage: overflow without a stated window → window undefi
 
 test("inspectOverflowMessage: bare markers without a number", () => {
   assert.equal(inspectOverflowMessage("error: context_length_exceeded").isOverflow, true);
-  assert.equal(inspectOverflowMessage("request_too_large").isOverflow, true);
+  // payload-bytes 413, not a token overflow
+  assert.equal(inspectOverflowMessage("413 {\"type\":\"error\",\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}").isOverflow, false);
   assert.equal(inspectOverflowMessage("your prompt exceeds the context window").isOverflow, true);
   assert.equal(inspectOverflowMessage("exceeded model token limit").isOverflow, true);
 });
