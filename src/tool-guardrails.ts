@@ -117,7 +117,7 @@ function buildCapNotice(dropped: number, maxBytes: number, fullPath?: string): s
 
 function buildTimeoutNotice(secs: number): string {
   const suggested = Math.min(Math.max(Math.ceil(secs * 2), 120), 3600);
-  return `\n\n[ACP guardrail: command killed after ${secs}s. To give it more time, re-run the bash tool with a larger \`timeout\` argument (e.g. \`"timeout": ${suggested}\`).]`;
+  return `\n\n[ACP guardrail: command killed after ${secs}s. If it is a long job (build, test suite, render, download, server), start it with a background tool that notifies on completion (for example \`bg_run\`, when available) instead of blocking the turn; do not detach it with \`&\` or \`nohup\`. Otherwise re-run the bash tool with a larger \`timeout\` argument (e.g. \`"timeout": ${suggested}\`).]`;
 }
 
 function formatBytes(n: number): string {
